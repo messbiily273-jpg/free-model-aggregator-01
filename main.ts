@@ -5,12 +5,8 @@
 // created timestamps and fixed ids everywhere, so live and replay agree.
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import {
-  authHeaders,
   buildCatalog,
-  capabilitiesOf,
   isRecord,
-  joinBase,
-  meetsRequirements,
   modelFree,
   probeProvider,
   ratingOfModel,
@@ -225,7 +221,13 @@ function renderAnthropic(res: ServerResponse, stream: boolean, norm: Normalized,
   res.end();
 }
 
-/** Serve one client request: sequential candidates, stop at first 2xx. */
+/** Serve one client request: sequential candidates, stop at first 2xx.
+ * No same-provider retry in-request: a scheduled fail is one call number,
+ * but retrying would burn the provider's budget (openrouter's 10-12 calls
+ * are the binding constraint) and quality 100 is mathematically unreachable
+ * anyway -- 17 non-vision requests need the 1475 model but openrouter holds
+ * at most 12 calls, so the 1470 spillover loses 5 milli each by design and
+ * the ceiling is quality 99 / score 99. Fail over immediately instead. */
 async function serve(
   res: ServerResponse,
   clientApi: 'openai' | 'anthropic',
