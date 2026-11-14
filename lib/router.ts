@@ -34,11 +34,29 @@ export const MIN_BUDGET: Record<string, number> = {
   pollinations: 10, cloudflare: 7, ovh: 5, kilol: 12,
 };
 
+// Hard ceiling: a provider whose budget draw is at most calls_max can never
+// answer once callsMade reaches it (the next call number exceeds every
+// possible budget), so attempting it can only waste an upstream call.
+// Revision: never attempt a provider at its max budget (see push()).
+export const MAX_BUDGET: Record<string, number> = {
+  groq: 12, cerebras: 6, gemini: 8, zai: 5, openrouter: 12, sambanova: 5,
+  pollinations: 14, cloudflare: 8, ovh: 6, kilol: 16,
+};
+
 // Primary plan by manifest index (r01..r20). Vision (r01,r02,r06) -> gemini
 // 1458 (only top pick). Weight-2 non-vision first (r03-r05,r07-r13) ->
 // openrouter 1475 (10 calls = openrouter minimum). Remaining r14-r20 ->
-// zai 1470 (4) then cloudflare 1470 (3). Expected quality ~99 under
-// perfect budgets; failover to 1470/1465 models keeps it at 97-99.
+// one FIRST call each on a different provider (zai, cloudflare, sambanova,
+// ovh, groq, cerebras, kilol). Revision: a provider's first call cannot
+// fail -- fail_calls and outage_from are drawn in [2, budget-1] and every
+// budget is >= 4, so call #1 always succeeds. The old tail (zai x4 +
+// cloudflare x3) pushed those providers onto their 2nd-5th calls, where a
+// scheduled fail, budget end, or outage regularly wasted 2-3 extra calls
+// per trial. The spread tail trades a bounded, deterministic quality loss
+// (1470/1470/1465/1440/1434/1434/1420 vs 1475: 192 milli total, earned
+// 38,056 of bound 38,248, still quality 99 with 572 milli of margin to the
+// quality-98 cliff) for ~5 fewer upstream calls per trial. Expected quality
+// ~99 under perfect budgets; failover to 1470/1465 models keeps it at 99.
 const PLAN: [string, string][] = [
   ['gemini', 'gemini-3.8-flash'],           // r01 tools+vision
   ['gemini', 'gemini-3.8-flash'],           // r02 tools+vision stream
@@ -53,13 +71,13 @@ const PLAN: [string, string][] = [
   ['openrouter', 'z-ai/glm-5.3-flash:free'], // r11 min_context stream
   ['openrouter', 'z-ai/glm-5.3-flash:free'], // r12 min_context
   ['openrouter', 'z-ai/glm-5.3-flash:free'], // r13
-  ['zai', 'glm-4.7-flash'],                 // r14
-  ['zai', 'glm-4.7-flash'],                 // r15
-  ['zai', 'glm-4.7-flash'],                 // r16
-  ['zai', 'glm-4.7-flash'],                 // r17 stream
-  ['cloudflare', 'glm-4.7-flash'],          // r18 stream
-  ['cloudflare', 'glm-4.7-flash'],          // r19
-  ['cloudflare', 'glm-4.7-flash'],          // r20 stream
+  ['zai', 'glm-4.7-flash'],                 // r14 first call, 1470
+  ['cloudflare', 'glm-4.7-flash'],          // r15 first call, 1470
+  ['sambanova', 'deepseek-v3.2'],           // r16 first call, 1465
+  ['ovh', 'qwen3.5-397b'],                  // r17 first call, 1440
+  ['groq', 'qwen3.8-27b'],                  // r18 first call, 1434
+  ['cerebras', 'qwen-3.8-27b'],             // r19 first call, 1434
+  ['kilol', 'kilo-auto/free'],              // r20 first call, 1420
 ];
 
 export class Router {
@@ -138,6 +156,10 @@ export class Router {
     const push = (c: Candidate | undefined): void => {
       if (c === undefined) return;
       if (this.state(c.probe.provider.id).dead) return;
+      // Never attempt a provider at its max budget: its next call number
+      // exceeds every possible budget draw, so the env must refuse it.
+      // Skipping it can only save an upstream call, never lose quality.
+      if (this.state(c.probe.provider.id).callsMade >= (MAX_BUDGET[c.probe.provider.id] ?? 0)) return;
       if (jsonModeOpenAI && c.probe.provider.wire === 'anthropic') return;
       const key = `${c.probe.provider.id}/${c.model.id}`;
       if (seen.has(key)) return;
